@@ -144,3 +144,49 @@
     )
   )
 )
+
+;; Public functions
+
+;; Initialize the contract with a BTC price
+(define-public (initialize (initial-btc-price uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (var-get initialized)) err-already-initialized)
+    
+    (var-set btc-price-in-usd initial-btc-price)
+    (var-set initialized true)
+    (var-set last-accrual-time (unwrap-panic (get-block-info? time (- block-height u1))))
+    
+    (ok true)
+  )
+)
+
+;; Update the BTC price (would be called by an oracle)
+(define-public (update-btc-price (new-price uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (var-set btc-price-in-usd new-price)
+    (ok true)
+  )
+)
+
+;; Deposit collateral (BTC)
+;; In a real implementation, this would integrate with sBTC or another Bitcoin representation
+(define-public (deposit-collateral (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    ;; In a real implementation, there would be an actual token transfer here
+    ;; This is a simplified version
+    (let (
+      (current-collateral (get-user-collateral tx-sender))
+    )
+      (map-set user-collateral tx-sender (+ current-collateral amount))
+      (var-set total-collateral (+ (var-get total-collateral) amount))
+      
+      (ok true)
+    )
+  )
+)
