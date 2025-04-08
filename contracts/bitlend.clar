@@ -71,3 +71,40 @@
 (define-read-only (get-user-borrowed (user principal))
   (default-to u0 (map-get? user-borrowed user))
 )
+
+;; Get current BTC price
+(define-read-only (get-btc-price)
+  (var-get btc-price-in-usd)
+)
+
+;; Calculate user health factor
+;; Health factor = (collateral-value * fixed-point) / (borrowed-value * liquidation-threshold)
+;; If health factor < 1.0 (fixed-point), loan can be liquidated
+(define-read-only (get-health-factor (user principal))
+  (let (
+    (collateral (get-user-collateral user))
+    (borrowed (get-user-borrowed user))
+    (btc-price (var-get btc-price-in-usd))
+  )
+    (if (is-eq borrowed u0)
+      (ok u0) ;; No loan, return 0
+      (let (
+        (collateral-value (* collateral btc-price))
+        (collateral-value-scaled (* collateral-value fixed-point-factor))
+        (borrowed-threshold-value (* borrowed liquidation-threshold))
+      )
+        (ok (/ collateral-value-scaled borrowed-threshold-value))
+      )
+    )
+  )
+)
+
+;; Calculate maximum borrowable amount for a user
+(define-read-only (get-max-borrowable (user principal))
+  (let (
+    (collateral (get-user-collateral user))
+    (btc-price (var-get btc-price-in-usd))
+  )
+    (/ (* collateral btc-price loan-to-value-ratio) fixed-point-factor)
+  )
+)
