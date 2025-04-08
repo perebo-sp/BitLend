@@ -108,3 +108,39 @@
     (/ (* collateral btc-price loan-to-value-ratio) fixed-point-factor)
   )
 )
+
+;; Check if a loan can be liquidated
+(define-read-only (can-liquidate? (user principal))
+  (let (
+    (health-factor-response (get-health-factor user))
+  )
+    (if (is-ok health-factor-response)
+      (let (
+        (health-factor (unwrap-panic health-factor-response))
+      )
+        (< health-factor fixed-point-factor)
+      )
+      false
+    )
+  )
+)
+
+;; Calculate interest accrued for a user
+(define-read-only (calculate-interest (user principal))
+  (let (
+    (borrowed (get-user-borrowed user))
+    (last-accrual (default-to u0 (map-get? user-last-accrual user)))
+    (current-block (unwrap-panic (get-block-info? time (- block-height u1))))
+    (time-elapsed (if (is-eq last-accrual u0)
+                     u0
+                     (- current-block last-accrual)))
+  )
+    ;; Simple interest calculation: borrowed * rate * time / (100% * seconds-in-year)
+    ;; Rate is in basis points (1/100 of a percent)
+    ;; We use 31536000 for seconds in a year (365 days)
+    (if (is-eq time-elapsed u0)
+      u0
+      (/ (* (* borrowed base-interest-rate) time-elapsed) (* fixed-point-factor u31536000))
+    )
+  )
+)
