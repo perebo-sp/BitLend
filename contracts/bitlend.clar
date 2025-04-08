@@ -190,3 +190,46 @@
     )
   )
 )
+
+;; Withdraw collateral
+(define-public (withdraw-collateral (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-collateral (get-user-collateral tx-sender))
+      (current-borrowed (get-user-borrowed tx-sender))
+    )
+      ;; Check if user has enough collateral
+      (asserts! (>= current-collateral amount) err-not-enough-funds)
+      
+      ;; If user has an outstanding loan, need to check health factor after withdrawal
+      (if (> current-borrowed u0)
+        (let (
+          (new-collateral (- current-collateral amount))
+          (btc-price (var-get btc-price-in-usd))
+          (collateral-value (* new-collateral btc-price))
+          (min-collateral-needed (/ (* current-borrowed fixed-point-factor) loan-to-value-ratio))
+        )
+          ;; Ensure enough collateral remains
+          (asserts! (>= collateral-value min-collateral-needed) err-collateral-below-threshold)
+          
+          ;; Update state
+          (map-set user-collateral tx-sender new-collateral)
+          (var-set total-collateral (- (var-get total-collateral) amount))
+          
+          ;; In a real implementation, there would be an actual token transfer here
+          (ok true)
+        )
+        (begin
+          ;; No loan, just withdraw
+          (map-set user-collateral tx-sender (- current-collateral amount))
+          (var-set total-collateral (- (var-get total-collateral) amount))
+          
+          ;; In a real implementation, there would be an actual token transfer here
+          (ok true)
+        )
+      )
+    )
+  )
+)
