@@ -233,3 +233,63 @@
     )
   )
 )
+
+;; Borrow stablecoins against collateral
+(define-public (borrow (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (max-borrowable (get-max-borrowable tx-sender))
+      (current-borrowed (get-user-borrowed tx-sender))
+      (accrued-interest (calculate-interest tx-sender))
+      (total-debt (+ current-borrowed accrued-interest))
+      (new-total-debt (+ total-debt amount))
+    )
+      ;; Check if borrowing is within limits
+      (asserts! (<= new-total-debt max-borrowable) err-too-much-debt)
+      
+      ;; Update user's debt with interest and new borrowed amount
+      (map-set user-borrowed tx-sender new-total-debt)
+      (map-set user-last-accrual tx-sender (unwrap-panic (get-block-info? time (- block-height u1))))
+      
+      ;; Update global state
+      (var-set total-borrowed (+ (var-get total-borrowed) amount))
+      
+      ;; In a real implementation, there would be an actual token transfer here
+      (ok true)
+    )
+  )
+)
+
+;; Repay loan (partially or fully)
+(define-public (repay (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-borrowed (get-user-borrowed tx-sender))
+      (accrued-interest (calculate-interest tx-sender))
+      (total-debt (+ current-borrowed accrued-interest))
+    )
+      ;; Check if user has a loan
+      (asserts! (> total-debt u0) err-no-open-loan)
+      
+      ;; Determine how much to repay (cap at total debt)
+      (let (
+        (amount-to-repay (if (> amount total-debt) total-debt amount))
+        (remaining-debt (- total-debt amount-to-repay))
+      )
+        ;; Update user's debt
+        (map-set user-borrowed tx-sender remaining-debt)
+        (map-set user-last-accrual tx-sender (unwrap-panic (get-block-info? time (- block-height u1))))
+        
+        ;; Update global state
+        (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
+        
+        ;; In a real implementation, there would be an actual token transfer here
+        (ok true)
+      )
+    )
+  )
+)
