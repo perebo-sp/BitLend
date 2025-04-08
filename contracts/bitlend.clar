@@ -293,3 +293,81 @@
     )
   )
 )
+
+;; Liquidate an under-collateralized position
+(define-public (liquidate (borrower principal) (repay-amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (can-be-liquidated (can-liquidate? borrower))
+      (borrower-debt (get-user-borrowed borrower))
+      (accrued-interest (calculate-interest borrower))
+      (total-debt (+ borrower-debt accrued-interest))
+      (borrower-collateral (get-user-collateral borrower))
+      (btc-price (var-get btc-price-in-usd))
+    )
+      ;; Check if the position can be liquidated
+      (asserts! can-be-liquidated err-not-liquidatable)
+      
+      ;; Limit repay amount to total debt
+      (let (
+        (amount-to-repay (if (> repay-amount total-debt) total-debt repay-amount))
+        (remaining-debt (- total-debt amount-to-repay))
+        
+        ;; Calculate collateral to seize (with bonus for liquidator)
+        ;; Collateral to seize = (repaid amount / BTC price) * (1 + liquidation penalty)
+        (repay-value amount-to-repay)
+        (liquidation-bonus-factor (+ fixed-point-factor liquidation-penalty))
+        (collateral-to-seize (/ (* repay-value liquidation-bonus-factor) (* btc-price fixed-point-factor)))
+      )
+        ;; Make sure there's enough collateral to seize
+        (asserts! (<= collateral-to-seize borrower-collateral) err-insufficient-collateral)
+        
+        ;; Update borrower's debt and collateral
+        (map-set user-borrowed borrower remaining-debt)
+        (map-set user-last-accrual borrower (unwrap-panic (get-block-info? time (- block-height u1))))
+        (map-set user-collateral borrower (- borrower-collateral collateral-to-seize))
+        
+        ;; Update liquidator's collateral
+        (let (
+          (liquidator-collateral (get-user-collateral tx-sender))
+        )
+          (map-set user-collateral tx-sender (+ liquidator-collateral collateral-to-seize))
+        )
+        
+        ;; Update global state
+        (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
+        
+        ;; In a real implementation, there would be actual token transfers here
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Accrue global interest (ideally called regularly, but not strictly required)
+(define-public (accrue-global-interest)
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-time (unwrap-panic (get-block-info? time (- block-height u1))))
+      (last-accrual (var-get last-accrual-time))
+      (time-elapsed (- current-time last-accrual))
+      (total-debt (var-get total-borrowed))
+    )
+      ;; Calculate new interest across all debt
+      (let (
+        (global-interest (if (is-eq time-elapsed u0)
+                          u0
+                          (/ (* (* total-debt base-interest-rate) time-elapsed) (* fixed-point-factor u31536000))))
+      )
+        ;; Update global state
+        (var-set total-borrowed (+ total-debt global-interest))
+        (var-set last-accrual-time current-time)
+        (ok true)
+      )
+    )
+  )
+)
