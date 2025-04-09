@@ -50,6 +50,9 @@
 ;; Price oracle data - would be updated by an oracle service
 (define-data-var btc-price-in-usd uint u0)
 
+;; Track previous price for significant deviation checks
+(define-data-var previous-btc-price uint u0)
+
 ;; Maps
 ;; User's collateral balance
 (define-map user-collateral principal uint)
@@ -59,6 +62,9 @@
 
 ;; Tracks when interest was last accrued for a user
 (define-map user-last-accrual principal uint)
+
+;; Set a maximum allowed price change percentage (e.g., 20%)
+(define-constant max-price-change-percentage u200000) ;; 20% in fixed point
 
 ;; Read-only functions
 
@@ -153,6 +159,10 @@
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (not (var-get initialized)) err-already-initialized)
     
+    ;; Add price validation
+    (asserts! (> initial-btc-price u0) (err u110)) ;; Price can't be zero
+    (asserts! (< initial-btc-price u1000000000000) (err u111)) ;; Upper bound sanity check
+    
     (var-set btc-price-in-usd initial-btc-price)
     (var-set initialized true)
     (var-set last-accrual-time stacks-block-height)
@@ -164,6 +174,19 @@
 ;; Update the BTC price (would be called by an oracle)
 (define-public (update-btc-price (new-price uint))
   (begin
+    ;; Check if the price has changed significantly
+	(let (
+	  (previous-price (var-get previous-btc-price))
+	  (price-change (if (is-eq previous-price u0)
+						u0
+						(* (/ (- new-price previous-price) previous-price) fixed-point-factor)))
+	)
+	  ;; Check for significant price change
+	  (asserts! (< price-change max-price-change-percentage) (err u112))
+	  
+	  ;; Update previous price
+	  (var-set previous-btc-price new-price)
+	)
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (var-get initialized) err-not-initialized)
     
@@ -173,19 +196,32 @@
 )
 
 ;; Deposit collateral (BTC)
-;; In a real implementation, this would integrate with sBTC or another Bitcoin representation
 (define-public (deposit-collateral (amount uint))
   (begin
     (asserts! (var-get initialized) err-not-initialized)
-
-    ;; This is a simplified version
+    (asserts! (> amount u0) (err u112)) ;; Amount must be positive
+    
+    ;; Add overflow protection
     (let (
       (current-collateral (get-user-collateral tx-sender))
+      (new-collateral (+ current-collateral amount))
     )
-      (map-set user-collateral tx-sender (+ current-collateral amount))
-      (var-set total-collateral (+ (var-get total-collateral) amount))
+      ;; Check for overflow
+      (asserts! (>= new-collateral current-collateral) (err u113))
       
-      (ok true)
+      ;; Also check global total overflow
+      (let (
+        (current-total (var-get total-collateral))
+        (new-total (+ current-total amount))
+      )
+        (asserts! (>= new-total current-total) (err u114))
+        
+        ;; Now safe to update
+        (map-set user-collateral tx-sender new-collateral)
+        (var-set total-collateral new-total)
+        
+        (ok true)
+      )
     )
   )
 )
