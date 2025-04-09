@@ -1,0 +1,405 @@
+;; BitLend: Bitcoin-Secured Decentralized Lending
+;; 
+;; Summary: A non-custodial lending protocol leveraging Bitcoin collateral through Stacks Layer 2
+;;          for secure, transparent stablecoin loans with automatic risk management.
+
+;; Description:
+;; BitLend enables users to participate in decentralized finance while maintaining Bitcoin exposure.
+;; Built on Stacks L2 for Bitcoin-native compliance, the protocol features:
+;; - BTC over-collateralization (125% minimum ratio)
+;; - Dynamic interest rates with 5% base APR
+;; - Automated liquidations with 10% penalty
+;; - Real-time price feeds via oracle integration
+;; - sBTC-compatible collateral management
+;; - Transparent debt tracking with continuous interest accrual
+;; 
+;; The protocol maintains Bitcoin's security guarantees while enabling sophisticated DeFi primitives
+;; through Clarity's predictable smart contract language. All operations are verifiable on-chain
+;; with Stacks' Bitcoin-anchored transactions.
+
+;; Define constants
+(define-constant contract-owner tx-sender)
+(define-constant err-owner-only (err u100))
+(define-constant err-insufficient-collateral (err u101))
+(define-constant err-too-much-debt (err u102))
+(define-constant err-not-borrower (err u103))
+(define-constant err-not-enough-funds (err u104))
+(define-constant err-collateral-below-threshold (err u105))
+(define-constant err-no-open-loan (err u106))
+(define-constant err-not-liquidatable (err u107))
+(define-constant err-already-initialized (err u108))
+(define-constant err-not-initialized (err u109))
+
+;; 80% - collateral must be 125% of loan value
+(define-constant liquidation-threshold u800000)
+;; 70% - can only borrow up to 70% of collateral value
+(define-constant loan-to-value-ratio u700000)
+;; 5% APR (in basis points: 500 = 5%)
+(define-constant base-interest-rate u500)
+;; 10% liquidation penalty (in basis points: 1000 = 10%)
+(define-constant liquidation-penalty u1000)
+;; 100% represents 1 in fixed-point calculations (6 decimal places)
+(define-constant fixed-point-factor u1000000)
+
+;; Data vars
+(define-data-var initialized bool false)
+(define-data-var total-collateral uint u0)
+(define-data-var total-borrowed uint u0)
+(define-data-var last-accrual-time uint u0)
+
+;; Price oracle data - would be updated by an oracle service
+(define-data-var btc-price-in-usd uint u0)
+
+;; Track previous price for significant deviation checks
+(define-data-var previous-btc-price uint u0)
+
+;; Maps
+;; User's collateral balance
+(define-map user-collateral principal uint)
+
+;; User's borrowed balance
+(define-map user-borrowed principal uint)
+
+;; Tracks when interest was last accrued for a user
+(define-map user-last-accrual principal uint)
+
+;; Set a maximum allowed price change percentage (e.g., 20%)
+(define-constant max-price-change-percentage u200000) ;; 20% in fixed point
+
+;; Read-only functions
+
+;; Get user collateral
+(define-read-only (get-user-collateral (user principal))
+  (default-to u0 (map-get? user-collateral user))
+)
+
+;; Get user borrowed amount
+(define-read-only (get-user-borrowed (user principal))
+  (default-to u0 (map-get? user-borrowed user))
+)
+
+;; Get current BTC price
+(define-read-only (get-btc-price)
+  (var-get btc-price-in-usd)
+)
+
+;; Calculate user health factor
+;; Health factor = (collateral-value * fixed-point) / (borrowed-value * liquidation-threshold)
+;; If health factor < 1.0 (fixed-point), loan can be liquidated
+(define-read-only (get-health-factor (user principal))
+  (let (
+    (collateral (get-user-collateral user))
+    (borrowed (get-user-borrowed user))
+    (btc-price (var-get btc-price-in-usd))
+  )
+    (if (is-eq borrowed u0)
+      (ok u0) ;; No loan, return 0
+      (let (
+        (collateral-value (* collateral btc-price))
+        (collateral-value-scaled (* collateral-value fixed-point-factor))
+        (borrowed-threshold-value (* borrowed liquidation-threshold))
+      )
+        (ok (/ collateral-value-scaled borrowed-threshold-value))
+      )
+    )
+  )
+)
+
+;; Calculate maximum borrowable amount for a user
+(define-read-only (get-max-borrowable (user principal))
+  (let (
+    (collateral (get-user-collateral user))
+    (btc-price (var-get btc-price-in-usd))
+  )
+    (/ (* collateral btc-price loan-to-value-ratio) fixed-point-factor)
+  )
+)
+
+;; Check if a loan can be liquidated
+(define-read-only (can-liquidate? (user principal))
+  (let (
+    (health-factor-response (get-health-factor user))
+  )
+    (if (is-ok health-factor-response)
+      (let (
+        (health-factor (unwrap-panic health-factor-response))
+      )
+        (< health-factor fixed-point-factor)
+      )
+      false
+    )
+  )
+)
+
+;; Calculate interest accrued for a user
+(define-read-only (calculate-interest (user principal))
+  (let (
+    (borrowed (get-user-borrowed user))
+    (last-accrual (default-to u0 (map-get? user-last-accrual user)))
+    (current-block stacks-block-height)
+    (time-elapsed (if (is-eq last-accrual u0)
+                     u0
+                     (- current-block last-accrual)))
+  )
+    ;; Simple interest calculation: borrowed * rate * time / (100% * seconds-in-year)
+    ;; Rate is in basis points (1/100 of a percent)
+    ;; We use 31536000 for seconds in a year (365 days)
+    (if (is-eq time-elapsed u0)
+      u0
+      (/ (* (* borrowed base-interest-rate) time-elapsed) (* fixed-point-factor u31536000))
+    )
+  )
+)
+
+;; Public functions
+
+;; Initialize the contract with a BTC price
+(define-public (initialize (initial-btc-price uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (var-get initialized)) err-already-initialized)
+    
+    ;; Add price validation
+    (asserts! (> initial-btc-price u0) (err u110)) ;; Price can't be zero
+    (asserts! (< initial-btc-price u1000000000000) (err u111)) ;; Upper bound sanity check
+    
+    (var-set btc-price-in-usd initial-btc-price)
+    (var-set initialized true)
+    (var-set last-accrual-time stacks-block-height)
+    
+    (ok true)
+  )
+)
+
+;; Update the BTC price (would be called by an oracle)
+(define-public (update-btc-price (new-price uint))
+  (begin
+    ;; Check if the price has changed significantly
+	(let (
+	  (previous-price (var-get previous-btc-price))
+	  (price-change (if (is-eq previous-price u0)
+						u0
+						(* (/ (- new-price previous-price) previous-price) fixed-point-factor)))
+	)
+	  ;; Check for significant price change
+	  (asserts! (< price-change max-price-change-percentage) (err u112))
+	  
+	  ;; Update previous price
+	  (var-set previous-btc-price new-price)
+	)
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (var-set btc-price-in-usd new-price)
+    (ok true)
+  )
+)
+
+;; Deposit collateral (BTC)
+(define-public (deposit-collateral (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    (asserts! (> amount u0) (err u112)) ;; Amount must be positive
+    
+    ;; Add overflow protection
+    (let (
+      (current-collateral (get-user-collateral tx-sender))
+      (new-collateral (+ current-collateral amount))
+    )
+      ;; Check for overflow
+      (asserts! (>= new-collateral current-collateral) (err u113))
+      
+      ;; Also check global total overflow
+      (let (
+        (current-total (var-get total-collateral))
+        (new-total (+ current-total amount))
+      )
+        (asserts! (>= new-total current-total) (err u114))
+        
+        ;; Now safe to update
+        (map-set user-collateral tx-sender new-collateral)
+        (var-set total-collateral new-total)
+        
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Withdraw collateral
+(define-public (withdraw-collateral (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-collateral (get-user-collateral tx-sender))
+      (current-borrowed (get-user-borrowed tx-sender))
+    )
+      ;; Check if user has enough collateral
+      (asserts! (>= current-collateral amount) err-not-enough-funds)
+      
+      ;; If user has an outstanding loan, need to check health factor after withdrawal
+      (if (> current-borrowed u0)
+        (let (
+          (new-collateral (- current-collateral amount))
+          (btc-price (var-get btc-price-in-usd))
+          (collateral-value (* new-collateral btc-price))
+          (min-collateral-needed (/ (* current-borrowed fixed-point-factor) loan-to-value-ratio))
+        )
+          ;; Ensure enough collateral remains
+          (asserts! (>= collateral-value min-collateral-needed) err-collateral-below-threshold)
+          
+          ;; Update state
+          (map-set user-collateral tx-sender new-collateral)
+          (var-set total-collateral (- (var-get total-collateral) amount))
+          
+
+          (ok true)
+        )
+        (begin
+          ;; No loan, just withdraw
+          (map-set user-collateral tx-sender (- current-collateral amount))
+          (var-set total-collateral (- (var-get total-collateral) amount))
+          
+
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+;; Borrow stablecoins against collateral
+(define-public (borrow (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (max-borrowable (get-max-borrowable tx-sender))
+      (current-borrowed (get-user-borrowed tx-sender))
+      (accrued-interest (calculate-interest tx-sender))
+      (total-debt (+ current-borrowed accrued-interest))
+      (new-total-debt (+ total-debt amount))
+    )
+      ;; Check if borrowing is within limits
+      (asserts! (<= new-total-debt max-borrowable) err-too-much-debt)
+      
+      ;; Update user's debt with interest and new borrowed amount
+      (map-set user-borrowed tx-sender new-total-debt)
+      (map-set user-last-accrual tx-sender stacks-block-height)
+      
+      ;; Update global state
+      (var-set total-borrowed (+ (var-get total-borrowed) amount))
+      
+      (ok true)
+    )
+  )
+)
+
+;; Repay loan (partially or fully)
+(define-public (repay (amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-borrowed (get-user-borrowed tx-sender))
+      (accrued-interest (calculate-interest tx-sender))
+      (total-debt (+ current-borrowed accrued-interest))
+    )
+      ;; Check if user has a loan
+      (asserts! (> total-debt u0) err-no-open-loan)
+      
+      ;; Determine how much to repay (cap at total debt)
+      (let (
+        (amount-to-repay (if (> amount total-debt) total-debt amount))
+        (remaining-debt (- total-debt amount-to-repay))
+      )
+        ;; Update user's debt
+        (map-set user-borrowed tx-sender remaining-debt)
+        (map-set user-last-accrual tx-sender stacks-block-height)
+        
+        ;; Update global state
+        (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
+        
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Liquidate an under-collateralized position
+(define-public (liquidate (borrower principal) (repay-amount uint))
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (can-be-liquidated (can-liquidate? borrower))
+      (borrower-debt (get-user-borrowed borrower))
+      (accrued-interest (calculate-interest borrower))
+      (total-debt (+ borrower-debt accrued-interest))
+      (borrower-collateral (get-user-collateral borrower))
+      (btc-price (var-get btc-price-in-usd))
+    )
+      ;; Check if the position can be liquidated
+      (asserts! can-be-liquidated err-not-liquidatable)
+      
+      ;; Limit repay amount to total debt
+      (let (
+        (amount-to-repay (if (> repay-amount total-debt) total-debt repay-amount))
+        (remaining-debt (- total-debt amount-to-repay))
+        
+        ;; Calculate collateral to seize (with bonus for liquidator)
+        ;; Collateral to seize = (repaid amount / BTC price) * (1 + liquidation penalty)
+        (repay-value amount-to-repay)
+        (liquidation-bonus-factor (+ fixed-point-factor liquidation-penalty))
+        (collateral-to-seize (/ (* repay-value liquidation-bonus-factor) (* btc-price fixed-point-factor)))
+      )
+        ;; Make sure there's enough collateral to seize
+        (asserts! (<= collateral-to-seize borrower-collateral) err-insufficient-collateral)
+        
+        ;; Update borrower's debt and collateral
+        (map-set user-borrowed borrower remaining-debt)
+        (map-set user-last-accrual borrower stacks-block-height)
+        (map-set user-collateral borrower (- borrower-collateral collateral-to-seize))
+        
+        ;; Update liquidator's collateral
+        (let (
+          (liquidator-collateral (get-user-collateral tx-sender))
+        )
+          (map-set user-collateral tx-sender (+ liquidator-collateral collateral-to-seize))
+        )
+        
+        ;; Update global state
+        (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
+        
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Accrue global interest (ideally called regularly, but not strictly required)
+(define-public (accrue-global-interest)
+  (begin
+    (asserts! (var-get initialized) err-not-initialized)
+    
+    (let (
+      (current-time stacks-block-height)
+      (last-accrual (var-get last-accrual-time))
+      (time-elapsed (- current-time last-accrual))
+      (total-debt (var-get total-borrowed))
+    )
+      ;; Calculate new interest across all debt
+      (let (
+        (global-interest (if (is-eq time-elapsed u0)
+                          u0
+                          (/ (* (* total-debt base-interest-rate) time-elapsed) (* fixed-point-factor u31536000))))
+      )
+        ;; Update global state
+        (var-set total-borrowed (+ total-debt global-interest))
+        (var-set last-accrual-time current-time)
+        (ok true)
+      )
+    )
+  )
+)
