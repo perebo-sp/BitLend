@@ -130,7 +130,7 @@
   (let (
     (borrowed (get-user-borrowed user))
     (last-accrual (default-to u0 (map-get? user-last-accrual user)))
-    (current-block (unwrap-panic (get-block-info? time (- block-height u1))))
+    (current-block stacks-block-height)
     (time-elapsed (if (is-eq last-accrual u0)
                      u0
                      (- current-block last-accrual)))
@@ -155,7 +155,7 @@
     
     (var-set btc-price-in-usd initial-btc-price)
     (var-set initialized true)
-    (var-set last-accrual-time (unwrap-panic (get-block-info? time (- block-height u1))))
+    (var-set last-accrual-time stacks-block-height)
     
     (ok true)
   )
@@ -177,8 +177,7 @@
 (define-public (deposit-collateral (amount uint))
   (begin
     (asserts! (var-get initialized) err-not-initialized)
-    
-    ;; In a real implementation, there would be an actual token transfer here
+
     ;; This is a simplified version
     (let (
       (current-collateral (get-user-collateral tx-sender))
@@ -218,7 +217,7 @@
           (map-set user-collateral tx-sender new-collateral)
           (var-set total-collateral (- (var-get total-collateral) amount))
           
-          ;; In a real implementation, there would be an actual token transfer here
+
           (ok true)
         )
         (begin
@@ -226,7 +225,7 @@
           (map-set user-collateral tx-sender (- current-collateral amount))
           (var-set total-collateral (- (var-get total-collateral) amount))
           
-          ;; In a real implementation, there would be an actual token transfer here
+
           (ok true)
         )
       )
@@ -251,12 +250,11 @@
       
       ;; Update user's debt with interest and new borrowed amount
       (map-set user-borrowed tx-sender new-total-debt)
-      (map-set user-last-accrual tx-sender (unwrap-panic (get-block-info? time (- block-height u1))))
+      (map-set user-last-accrual tx-sender stacks-block-height)
       
       ;; Update global state
       (var-set total-borrowed (+ (var-get total-borrowed) amount))
       
-      ;; In a real implementation, there would be an actual token transfer here
       (ok true)
     )
   )
@@ -282,12 +280,11 @@
       )
         ;; Update user's debt
         (map-set user-borrowed tx-sender remaining-debt)
-        (map-set user-last-accrual tx-sender (unwrap-panic (get-block-info? time (- block-height u1))))
+        (map-set user-last-accrual tx-sender stacks-block-height)
         
         ;; Update global state
         (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
         
-        ;; In a real implementation, there would be an actual token transfer here
         (ok true)
       )
     )
@@ -326,7 +323,7 @@
         
         ;; Update borrower's debt and collateral
         (map-set user-borrowed borrower remaining-debt)
-        (map-set user-last-accrual borrower (unwrap-panic (get-block-info? time (- block-height u1))))
+        (map-set user-last-accrual borrower stacks-block-height)
         (map-set user-collateral borrower (- borrower-collateral collateral-to-seize))
         
         ;; Update liquidator's collateral
@@ -339,7 +336,6 @@
         ;; Update global state
         (var-set total-borrowed (- (var-get total-borrowed) amount-to-repay))
         
-        ;; In a real implementation, there would be actual token transfers here
         (ok true)
       )
     )
@@ -352,7 +348,7 @@
     (asserts! (var-get initialized) err-not-initialized)
     
     (let (
-      (current-time (unwrap-panic (get-block-info? time (- block-height u1))))
+      (current-time stacks-block-height)
       (last-accrual (var-get last-accrual-time))
       (time-elapsed (- current-time last-accrual))
       (total-debt (var-get total-borrowed))
